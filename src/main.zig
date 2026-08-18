@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const sqlite3 = opaque {};
 const sqlite3_stmt = opaque {};
 
@@ -282,19 +283,25 @@ fn privateContact(arena: Allocator, app: *App, request: *std.http.Server.Request
 fn subscribe(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
     const body = try readBody(arena, request);
     const raw_email = formValue(body, "email") orelse return respondDatastarPatch(request, "#subscribe-result", subscribe_error_html);
-    const email = try normalizeEmail(arena, raw_email);
-    if (!validEmail(email)) return respondDatastarPatch(request, "#subscribe-result", subscribe_error_html);
+    const email = normalizeEmail(arena, raw_email) catch {
+        return respondDatastarPatch(request, "#subscribe-result", subscribe_error_html);
+    };
+    if (!validEmail(email)) {
+        return respondDatastarPatch(request, "#subscribe-result", subscribe_error_html);
+    }
 
-    var token_buf: [32]u8 = undefined;
-    randomBytes(&token_buf);
-    const token = try hexLower(arena, &token_buf);
+    var token_bytes: [32]u8 = undefined;
+    try randomBytes(&token_bytes);
+    const token = try hexLower(arena, &token_bytes);
     _ = try app.db.subscribe(email, token, nowSeconds());
-    const fragment = try std.fmt.allocPrint(arena, subscribe_success_html, .{email});
+
+    const email_html = try htmlEscape(arena, email);
+    const fragment = try std.fmt.allocPrint(arena, subscribe_success_html, .{email_html});
     try respondDatastarPatch(request, "#subscribe-result", fragment);
 }
 
 fn unsubscribe(arena: Allocator, app: *App, request: *std.http.Server.Request, token: []const u8) !void {
-    const decoded = try urlDecode(arena, token);
+    const decoded = urlDecode(arena, token) catch "";
     const ok = try app.db.unsubscribe(decoded, nowSeconds());
     const body = try std.fmt.allocPrint(arena, unsubscribe_html, .{if (ok) "You are unsubscribed." else "This unsubscribe link is unknown or already used."});
     try request.respond(body, .{ .extra_headers = &html_headers });
@@ -343,26 +350,78 @@ fn normalizeEmail(arena: Allocator, raw: []const u8) ![]u8 {
 }
 
 fn validEmail(email: []const u8) bool {
-    return email.len >= 3 and email.len <= 254 and std.mem.indexOfScalar(u8, email, '@') != null and std.mem.indexOfScalar(u8, email, ' ') == null;
+    if (email.len < 3) return false;
+    if (email.len > 254) return false;
+
+    var at_count: u8 = 0;
+    for (email) |byte| {
+        if (byte <= 0x20) return false;
+        if (byte >= 0x7f) return false;
+        if (byte == '@') at_count += 1;
+    }
+    if (at_count != 1) return false;
+
+    const at = std.mem.indexOfScalar(u8, email, '@') orelse return false;
+    if (at == 0) return false;
+    if (at + 1 >= email.len) return false;
+    return true;
 }
 
 fn urlDecode(arena: Allocator, input: []const u8) ![]u8 {
+    assert(input.len <= max_body_size);
+
     var out: std.ArrayList(u8) = .empty;
-    for (input, 0..) |ch, i| {
-        _ = i;
-        if (ch == '+') {
+    var byte_index: usize = 0;
+    while (byte_index < input.len) {
+        const byte = input[byte_index];
+        if (byte == '+') {
             try out.append(arena, ' ');
-        } else if (ch == '%') {
-            // Simpler robust-enough decoder for form fields.
-            continue;
+            byte_index += 1;
+        } else if (byte == '%') {
+            if (byte_index + 2 >= input.len) return error.InvalidPercentEncoding;
+            const high = try hexNibble(input[byte_index + 1]);
+            const low = try hexNibble(input[byte_index + 2]);
+            try out.append(arena, (high << 4) | low);
+            byte_index += 3;
         } else {
-            try out.append(arena, ch);
+            try out.append(arena, byte);
+            byte_index += 1;
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
+fn hexNibble(byte: u8) !u8 {
+    if ('0' <= byte) {
+        if (byte <= '9') return byte - '0';
+    }
+    if ('a' <= byte) {
+        if (byte <= 'f') return byte - 'a' + 10;
+    }
+    if ('A' <= byte) {
+        if (byte <= 'F') return byte - 'A' + 10;
+    }
+    return error.InvalidPercentEncoding;
+}
+
+fn htmlEscape(arena: Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (input) |byte| {
+        switch (byte) {
+            '&' => try out.appendSlice(arena, "&amp;"),
+            '<' => try out.appendSlice(arena, "&lt;"),
+            '>' => try out.appendSlice(arena, "&gt;"),
+            '"' => try out.appendSlice(arena, "&quot;"),
+            '\'' => try out.appendSlice(arena, "&#39;"),
+            else => try out.append(arena, byte),
         }
     }
     return out.toOwnedSlice(arena);
 }
 
 fn bindText(stmt: *sqlite3_stmt, idx: c_int, text: []const u8) !void {
+    assert(idx > 0);
+    assert(text.len <= max_body_size);
     if (sqlite3_bind_text(stmt, idx, text.ptr, @intCast(text.len), SQLITE_TRANSIENT) != SQLITE_OK) return error.SqliteBindFailed;
 }
 
@@ -408,13 +467,16 @@ fn nowSeconds() i64 {
     return @intCast(@divTrunc(Io.Clock.now(.real, shared_io).nanoseconds, std.time.ns_per_s));
 }
 
-fn randomBytes(buf: []u8) void {
-    const seed: u64 = @bitCast(@as(i64, @truncate(Io.Clock.now(.real, shared_io).nanoseconds)));
-    var prng = std.Random.DefaultPrng.init(seed);
-    prng.random().bytes(buf);
+fn randomBytes(buffer: []u8) !void {
+    assert(buffer.len > 0);
+    assert(buffer.len <= 1024);
+    try Io.randomSecure(shared_io, buffer);
 }
 
 fn hexLower(allocator: Allocator, bytes: []const u8) ![]u8 {
+    assert(bytes.len > 0);
+    assert(bytes.len <= 1024);
+
     const alphabet = "0123456789abcdef";
     var out = try allocator.alloc(u8, bytes.len * 2);
     for (bytes, 0..) |b, i| {

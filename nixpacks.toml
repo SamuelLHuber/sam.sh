@@ -1,8 +1,20 @@
+[variables]
+ZIG_VERSION = "0.17.0-dev.1662+cc6f42302"
+ZIG_TARGET = "x86_64-linux"
+ZIG_GLOBAL_CACHE_DIR = "/tmp/zig-cache"
+
 [phases.setup]
-nixPkgs = ["zig", "sqlite"]
+nixPkgs = ["curl", "sqlite", "tar", "xz"]
+
+[phases.install]
+cmds = [
+  "curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/builds/zig-${ZIG_TARGET}-${ZIG_VERSION}.tar.xz",
+  "mkdir -p /opt/zig",
+  "tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1",
+]
 
 [phases.build]
-cmds = ["zig build -Doptimize=ReleaseSafe"]
+cmds = ["/opt/zig/zig build -Doptimize=ReleaseSafe"]
 
 [start]
 cmd = "./zig-out/bin/sam-sh"
