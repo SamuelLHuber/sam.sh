@@ -4,7 +4,8 @@ ZIG_TARGET = "x86_64-linux"
 ZIG_GLOBAL_CACHE_DIR = "/tmp/zig-cache"
 
 [phases.setup]
-nixPkgs = ["curl", "sqlite", "gnutar", "xz"]
+nixPkgs = ["curl", "gnutar", "xz"]
+aptPkgs = ["libsqlite3-dev"]
 
 [phases.install]
 cmds = [
