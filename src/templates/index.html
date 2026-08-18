@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Samuel Huber — contact</title>
+  <meta name="description" content="A small contact hub for Samuel Huber.">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@main/bundles/datastar.js"></script>
+</head>
+<body>
+  <main class="wall">
+    <section class="hero paper-card">
+      <p class="eyebrow">sam.sh</p>
+      <h1>Samuel Huber</h1>
+      <p class="lead">A small doorway for reaching me. If we know each other from Farcaster or Twitter/X, verify mutuals to open the private wooden door for phone contact. Otherwise, use one of the public boards below.</p>
+    </section>
+
+    <section class="boards" aria-label="Public contact methods">
+      <a class="board" href="https://instagram.com/samuellhuber" rel="me">Instagram <span>DM me there</span></a>
+      <a class="board" href="https://www.linkedin.com/in/samuellhuber/" rel="me">LinkedIn <span>Send a context note</span></a>
+      <a class="board" href="https://twitter.com/messages/compose?text=Hi%20Samuel%20%E2%80%94%20I%20found%20your%20contact%20page%20and%20wanted%20to%20reach%20out%20about%20" rel="me">Twitter/X <span>Prefilled DM intent</span></a>
+      <a class="board" href="https://t.me/samuellhuber?text=Hi%20Samuel%20%E2%80%94%20I%20found%20your%20contact%20page." rel="me">Telegram <span>Prefilled message</span></a>
+    </section>
+
+    <section id="private-contact" class="door" data-on-load="@get('/private-contact')">
+      <p class="eyebrow">wooden door</p>
+      <h2>Phone contact for mutuals</h2>
+      <p>The door opens after Farcaster/Twitter mutual verification.</p>
+      <div class="actions">
+        <a class="button" href="/auth/farcaster/start">Open with Farcaster</a>
+        <a class="button secondary" href="/auth/twitter/start">Verify Twitter/X</a>
+      </div>
+    </section>
+
+    <section class="paper-card newsletter">
+      <p class="eyebrow">personal updates</p>
+      <h2>Subscribe to life/travel notes</h2>
+      <p>Occasional manual emails when something meaningful changes or I am somewhere you might want to know about. Current confirmed subscribers: {}.</p>
+      <form data-on-submit="@post('/subscribe')">
+        <label for="email">Email</label>
+        <div class="form-row">
+          <input id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
+          <button type="submit">Subscribe</button>
+        </div>
+      </form>
+      <div id="subscribe-result" aria-live="polite"></div>
+    </section>
+  </main>
+</body>
+</html>

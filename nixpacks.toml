@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["zig", "sqlite"]
+
+[phases.build]
+cmds = ["zig build -Doptimize=ReleaseSafe"]
+
+[start]
+cmd = "./zig-out/bin/sam-sh"

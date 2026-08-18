@@ -1,0 +1,7 @@
+.{
+    .name = .sam_sh,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.17.0-dev.1662+cc6f42302",
+    .paths = .{""},
+    .fingerprint = 0x71f1053d04a1113f,
+}
