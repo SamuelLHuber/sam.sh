@@ -21,12 +21,6 @@ zig build run
 
 Open <http://localhost:8080>.
 
-Test the private-contact reveal UI locally:
-
-```txt
-/private-contact?demo=verified
-```
-
 ## Environment
 
 Copy `.env.example` into your secret manager / Railway variables. Do not commit real secrets.
@@ -55,11 +49,3 @@ zig build run -- send-update ./updates/example.md
 
 SMTP delivery is intentionally still TODO in this initial scaffold.
 
-## Auth status
-
-Farcaster/Twitter mutual verification routes are placeholders. V1 implementation plan:
-
-1. Farcaster Sign-in + social graph mutual check.
-2. SQLite verified identity/session storage.
-3. Datastar private-contact fragment reveal.
-4. Twitter/X login/manual allowlist or automatic check if API access is available.

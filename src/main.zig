@@ -36,9 +36,6 @@ const Config = struct {
     port: u16,
     base_url: []const u8,
     database_path: []const u8,
-    private_phone: []const u8,
-    whatsapp_number: []const u8,
-    imessage_target: []const u8,
     smtp_host: []const u8,
     smtp_port: u16,
     smtp_username: []const u8,
@@ -50,9 +47,6 @@ const Config = struct {
             .port = try envU16("PORT", 8080),
             .base_url = try envOrDup(allocator, "BASE_URL", "http://localhost:8080"),
             .database_path = try envOrDup(allocator, "DATABASE_PATH", "./sam-sh.sqlite"),
-            .private_phone = try envOrDup(allocator, "PRIVATE_PHONE", "+49123456789"),
-            .whatsapp_number = try envOrDup(allocator, "WHATSAPP_NUMBER", "49123456789"),
-            .imessage_target = try envOrDup(allocator, "IMESSAGE_TARGET", "+49123456789"),
             .smtp_host = try envOrDup(allocator, "SMTP_HOST", ""),
             .smtp_port = try envU16("SMTP_PORT", 587),
             .smtp_username = try envOrDup(allocator, "SMTP_USERNAME", ""),
@@ -149,18 +143,6 @@ const schema_sql =
     \\  confirmed_at INTEGER,
     \\  unsubscribed_at INTEGER
     \\);
-    \\CREATE TABLE IF NOT EXISTS verified_identities (
-    \\  id INTEGER PRIMARY KEY,
-    \\  provider TEXT NOT NULL,
-    \\  provider_user_id TEXT NOT NULL,
-    \\  handle TEXT NOT NULL,
-    \\  display_name TEXT,
-    \\  is_mutual INTEGER NOT NULL DEFAULT 0,
-    \\  session_token TEXT NOT NULL UNIQUE,
-    \\  created_at INTEGER NOT NULL,
-    \\  last_verified_at INTEGER NOT NULL,
-    \\  UNIQUE(provider, provider_user_id)
-    \\);
     \\CREATE TABLE IF NOT EXISTS sent_updates (
     \\  id INTEGER PRIMARY KEY,
     \\  subject TEXT NOT NULL,
@@ -245,11 +227,8 @@ fn handleRequest(arena: Allocator, app: *App, request: *std.http.Server.Request)
 
     if (request.head.method == .GET and std.mem.eql(u8, path, "/")) return index(arena, app, request);
     if (request.head.method == .GET and std.mem.eql(u8, path, "/styles.css")) return css(request);
-    if (request.head.method == .GET and std.mem.eql(u8, path, "/private-contact")) return privateContact(arena, app, request);
     if (request.head.method == .POST and std.mem.eql(u8, path, "/subscribe")) return subscribe(arena, app, request);
     if (request.head.method == .GET and std.mem.startsWith(u8, path, "/unsubscribe/")) return unsubscribe(arena, app, request, path[13..]);
-    if (request.head.method == .GET and std.mem.startsWith(u8, path, "/auth/farcaster/")) return authPlaceholder(request, "Farcaster");
-    if (request.head.method == .GET and std.mem.startsWith(u8, path, "/auth/twitter/")) return authPlaceholder(request, "Twitter/X");
     if (request.head.method == .GET and std.mem.eql(u8, path, "/health")) return request.respond("ok", .{});
 
     return request.respond("not found", .{ .status = .not_found });
@@ -263,21 +242,6 @@ fn index(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
 
 fn css(request: *std.http.Server.Request) !void {
     try request.respond(@embedFile("styles.css"), .{ .extra_headers = &css_headers });
-}
-
-fn privateContact(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
-    // V1 placeholder: automatic Farcaster/Twitter mutual auth is still TODO.
-    // To test the reveal UI locally, request /private-contact?demo=verified.
-    const verified = std.mem.indexOf(u8, request.head.target, "demo=verified") != null;
-    const fragment = if (verified)
-        try std.fmt.allocPrint(arena, private_contact_html, .{
-            app.config.private_phone,
-            app.config.whatsapp_number,
-            app.config.imessage_target,
-        })
-    else
-        closed_door_html;
-    try respondDatastarPatch(request, "#private-contact", fragment);
 }
 
 fn subscribe(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
@@ -305,11 +269,6 @@ fn unsubscribe(arena: Allocator, app: *App, request: *std.http.Server.Request, t
     const ok = try app.db.unsubscribe(decoded, nowSeconds());
     const body = try std.fmt.allocPrint(arena, unsubscribe_html, .{if (ok) "You are unsubscribed." else "This unsubscribe link is unknown or already used."});
     try request.respond(body, .{ .extra_headers = &html_headers });
-}
-
-fn authPlaceholder(request: *std.http.Server.Request, provider: []const u8) !void {
-    _ = provider;
-    try request.respond("mutual verification is not wired yet", .{ .status = .not_implemented });
 }
 
 fn respondDatastarPatch(request: *std.http.Server.Request, selector: []const u8, fragment: []const u8) !void {
@@ -457,8 +416,6 @@ const sse_headers = [_]std.http.Header{
 };
 
 const index_html = @embedFile("templates/index.html");
-const private_contact_html = @embedFile("templates/private-contact.html");
-const closed_door_html = @embedFile("templates/closed-door.html");
 const subscribe_success_html = @embedFile("templates/subscribe-success.html");
 const subscribe_error_html = @embedFile("templates/subscribe-error.html");
 const unsubscribe_html = @embedFile("templates/unsubscribe.html");

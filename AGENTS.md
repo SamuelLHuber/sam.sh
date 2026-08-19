@@ -12,9 +12,6 @@ The site is a one-page personal contact hub with:
   - LinkedIn
   - Twitter/X
   - Telegram
-- A mutual-only private contact flow where Twitter/X or Farcaster mutuals can verify their account and then see Samuel's phone contact options:
-  - WhatsApp
-  - iMessage/SMS
 - A lightweight personal-update subscription tracker/newsletter:
   - Visitors can subscribe with email.
   - Samuel can manually send updates from his own mail via SMTP from Zig.
@@ -22,7 +19,7 @@ The site is a one-page personal contact hub with:
 
 ## Architecture decision
 
-This cannot be pure HTML if private phone access and subscriber persistence are required.
+This is not pure HTML because subscriber persistence and manual update tracking are required.
 
 Use:
 
@@ -62,24 +59,12 @@ PORT=8080
 BASE_URL=https://sam.sh
 DATABASE_PATH=/data/sam-sh.sqlite
 
-PRIVATE_PHONE=+49123456789
-WHATSAPP_NUMBER=49123456789
-IMESSAGE_TARGET=+49123456789
-
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_USERNAME=you@example.com
 SMTP_PASSWORD=...
 SMTP_FROM="Samuel <you@example.com>"
 
-SESSION_SECRET=...
-
-FARCASTER_CLIENT_ID=...
-FARCASTER_CLIENT_SECRET=...
-FARCASTER_API_KEY=...
-
-TWITTER_CLIENT_ID=...
-TWITTER_CLIENT_SECRET=...
 ```
 
 Do not commit real secrets.
@@ -95,8 +80,6 @@ It should include:
 - About paragraph.
 - Public social/contact links.
 - Email subscription form.
-- Mutual verification section.
-- Private contact area that is only populated after successful verification.
 
 ### Public contact links
 
@@ -106,39 +89,6 @@ Anyone can use:
 - LinkedIn profile/message link
 - Twitter/X DM/profile link
 - Telegram link
-
-### Private contact
-
-Only verified mutuals should see:
-
-- WhatsApp link
-- iMessage/SMS link
-- Raw phone number, if desired
-
-Never include the private phone number in the initial static HTML. Only return it from trusted backend logic after verification.
-
-### Farcaster verification
-
-Prefer Farcaster for v1 because social graph access is more practical than Twitter/X.
-
-Acceptable v1 approaches:
-
-- Sign in with Farcaster plus Neynar or another Farcaster API.
-- Check whether the visitor and Samuel are mutuals.
-- Store verification result in SQLite.
-- Set a secure session cookie.
-
-### Twitter/X verification
-
-Twitter/X mutual verification may be restricted or paid.
-
-Do not make v1 depend on Twitter working perfectly.
-
-Acceptable approaches:
-
-- Twitter login proves identity, then manual approval.
-- SQLite allowlist of Twitter handles/user IDs.
-- Later: automatic mutual check if API access is available.
 
 ### Newsletter/update tracker
 
@@ -166,13 +116,6 @@ POST /subscribe                 subscribe email
 GET  /confirm/:token            optional email confirmation
 GET  /unsubscribe/:token        unsubscribe email
 
-GET  /auth/farcaster/start      start Farcaster verification
-GET  /auth/farcaster/callback   finish Farcaster verification
-
-GET  /auth/twitter/start        start Twitter/X verification
-GET  /auth/twitter/callback     finish Twitter/X verification
-
-GET  /private-contact           Datastar endpoint that returns phone links if verified
 ```
 
 Optional later:
@@ -200,19 +143,6 @@ CREATE TABLE IF NOT EXISTS subscribers (
   unsubscribed_at INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS verified_identities (
-  id INTEGER PRIMARY KEY,
-  provider TEXT NOT NULL,
-  provider_user_id TEXT NOT NULL,
-  handle TEXT NOT NULL,
-  display_name TEXT,
-  is_mutual INTEGER NOT NULL DEFAULT 0,
-  session_token TEXT NOT NULL UNIQUE,
-  created_at INTEGER NOT NULL,
-  last_verified_at INTEGER NOT NULL,
-  UNIQUE(provider, provider_user_id)
-);
-
 CREATE TABLE IF NOT EXISTS sent_updates (
   id INTEGER PRIMARY KEY,
   subject TEXT NOT NULL,
@@ -226,14 +156,14 @@ CREATE TABLE IF NOT EXISTS sent_updates (
 
 The visual design should feel modern, sophisticated, organic, tactile, and quiet.
 
-Concept: anthracite dark-charcoal palette, dark wood grain accents, stone-wall mass, wooden-door affordances, and a matte paper-like physical texture.
+Concept: anthracite dark-charcoal palette, dark wood grain accents, stone-wall mass, wooden board affordances, and a matte paper-like physical texture.
 
 Reference/inspiration:
 
 - Behance: `Little Red Hen bakery website` (`https://www.behance.net/gallery/104056823/Little-Red-Hen-bakery-website`)
 - If the Behance page is inaccessible, keep the spirit rather than copying: warm handcrafted layout, tactile materials, rustic sophistication, dark wood, earthy contrast, and editorial spacing.
 
-The intended metaphor: the visitor approaches a dark anthracite/stone wall. Contact options are presented as wooden boards or a wooden door set into that wall. Verified mutuals can "open" the private wooden door/board area to reveal Samuel's phone contact methods.
+The intended metaphor: the visitor approaches a dark anthracite/stone wall. Contact options are presented as wooden boards set into that wall.
 
 ### Color and background
 
@@ -247,7 +177,7 @@ The intended metaphor: the visitor approaches a dark anthracite/stone wall. Cont
 - Dark wood accents:
   - Use low-contrast dark oak / charred wood grain feel.
   - Base around `#181A1B` with warmer brown grain tones layered in.
-  - Use on structural cards, headers, side panels, contact boards, and the mutual-only "door" panel.
+  - Use on structural cards, headers, side panels, and contact boards.
 - Avoid pure white text.
 - Use warm cream or muted stone gray:
   - Warm cream: `#F4F1EA`
@@ -265,9 +195,6 @@ The intended metaphor: the visitor approaches a dark anthracite/stone wall. Cont
 
 - Content blocks can mimic heavy cotton paper or matte parchment pinned/placed on dark wooden boards.
 - Public contact methods may appear as separate wooden planks/boards mounted on the stone wall.
-- The mutual-only phone section should feel like a wooden door, hatch, or set of boards embedded in the wall.
-- Before verification, the door is closed and explains that mutual verification opens it.
-- After verification, Datastar swaps in the revealed private contact card/door interior.
 - Use soft, diffused, multi-layer shadows for physical depth.
 - Avoid harsh outlines.
 - Use thin charcoal-brown/inset borders:
@@ -296,7 +223,6 @@ Avoid overly futuristic or sterile type.
 - No loud animations.
 - Hover/focus should feel like a slight lift, door-latch glow, or warm illumination from behind a wooden panel.
 - Focus states must remain accessible.
-- Verification actions can use door/opening language, e.g. "Open with Farcaster", "Verify mutuals", "Unlock phone contact".
 - Contact links should use prefilled intent URLs whenever the platform supports it, so the visitor can message Samuel directly with context instead of starting from a blank compose window.
 
 Suggested accent colors:
@@ -316,8 +242,6 @@ soft gold: #C9A66B
 - Treat all user input as untrusted.
 - Validate and normalize email addresses.
 - Use parameterized SQLite statements.
-- Use secure, HTTP-only cookies for sessions.
-- Do not leak private phone data in logs or HTML before verification.
 - Ensure unsubscribe links are unguessable.
 - Log enough for debugging but avoid logging secrets, tokens, or private contact details.
 
