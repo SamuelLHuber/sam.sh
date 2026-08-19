@@ -256,9 +256,9 @@ fn handleRequest(arena: Allocator, app: *App, request: *std.http.Server.Request)
 }
 
 fn index(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
-    const count = app.db.subscriberCount() catch 0;
-    const body = try std.fmt.allocPrint(arena, index_html, .{count});
-    try request.respond(body, .{ .extra_headers = &html_headers });
+    _ = arena;
+    _ = app;
+    try request.respond(index_html, .{ .extra_headers = &html_headers });
 }
 
 fn css(request: *std.http.Server.Request) !void {
