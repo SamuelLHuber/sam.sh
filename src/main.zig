@@ -15,6 +15,8 @@ extern fn sqlite3_bind_int64(stmt: *sqlite3_stmt, idx: c_int, value: i64) c_int;
 extern fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
 extern fn sqlite3_changes(db: *sqlite3) c_int;
 extern fn sqlite3_column_int(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
+extern fn sqlite3_column_text(stmt: ?*sqlite3_stmt, iCol: c_int) ?[*:0]const u8;
+extern fn sqlite3_column_bytes(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
 
 const SQLITE_OK = 0;
 const SQLITE_ROW = 100;
@@ -30,6 +32,8 @@ const Allocator = std.mem.Allocator;
 pub const std_options = std.Options{ .log_level = .info };
 
 const max_body_size = 16 * 1024;
+const max_update_body_size = 32 * 1024;
+const admin_lock_path = "/tmp/sam-sh-send-update.lock";
 var shared_io: Io = undefined;
 
 const Config = struct {
@@ -41,6 +45,8 @@ const Config = struct {
     smtp_username: []const u8,
     smtp_password: []const u8,
     smtp_from: []const u8,
+    admin_username: []const u8,
+    admin_password: []const u8,
 
     fn load(allocator: Allocator) !Config {
         return .{
@@ -52,6 +58,8 @@ const Config = struct {
             .smtp_username = try envOrDup(allocator, "SMTP_USERNAME", ""),
             .smtp_password = try envOrDup(allocator, "SMTP_PASSWORD", ""),
             .smtp_from = try envOrDup(allocator, "SMTP_FROM", "Samuel <you@example.com>"),
+            .admin_username = try envOrDup(allocator, "ADMIN_USERNAME", ""),
+            .admin_password = try envOrDup(allocator, "ADMIN_PASSWORD", ""),
         };
     }
 };
@@ -60,6 +68,26 @@ const App = struct {
     allocator: Allocator,
     config: Config,
     db: Database,
+};
+
+const Subscriber = struct {
+    email: []const u8,
+    unsubscribe_token: []const u8,
+
+    fn deinit(self: Subscriber, allocator: Allocator) void {
+        allocator.free(self.email);
+        allocator.free(self.unsubscribe_token);
+    }
+};
+
+const Update = struct {
+    subject: []const u8,
+    body: []const u8,
+};
+
+const SendResult = struct {
+    sent_count: u32,
+    failed_count: u32,
 };
 
 const Database = struct {
@@ -129,6 +157,42 @@ const Database = struct {
         defer _ = sqlite3_finalize(stmt);
         if (sqlite3_step(stmt) != SQLITE_ROW) return error.SqliteStepFailed;
         return @intCast(sqlite3_column_int(stmt, 0));
+    }
+
+    fn subscriberList(self: Database, allocator: Allocator) ![]Subscriber {
+        const sql = "SELECT email, unsubscribe_token FROM subscribers WHERE status='confirmed' ORDER BY id";
+        var stmt: ?*sqlite3_stmt = null;
+        if (sqlite3_prepare_v2(self.handle, sql, -1, &stmt, null) != SQLITE_OK) return error.SqlitePrepareFailed;
+        defer _ = sqlite3_finalize(stmt);
+
+        var rows: std.ArrayList(Subscriber) = .empty;
+        errdefer {
+            for (rows.items) |subscriber| subscriber.deinit(allocator);
+            rows.deinit(allocator);
+        }
+
+        while (true) {
+            const step = sqlite3_step(stmt);
+            if (step == SQLITE_DONE) break;
+            if (step != SQLITE_ROW) return error.SqliteStepFailed;
+            try rows.append(allocator, .{
+                .email = try columnTextDup(allocator, stmt, 0),
+                .unsubscribe_token = try columnTextDup(allocator, stmt, 1),
+            });
+        }
+        return rows.toOwnedSlice(allocator);
+    }
+
+    fn recordSentUpdate(self: Database, subject: []const u8, body: []const u8, now: i64, recipient_count: u32) !void {
+        const sql = "INSERT INTO sent_updates (subject, body, sent_at, recipient_count) VALUES (?1, ?2, ?3, ?4)";
+        var stmt: ?*sqlite3_stmt = null;
+        if (sqlite3_prepare_v2(self.handle, sql, -1, &stmt, null) != SQLITE_OK) return error.SqlitePrepareFailed;
+        defer _ = sqlite3_finalize(stmt);
+        try bindText(stmt.?, 1, subject);
+        try bindText(stmt.?, 2, body);
+        if (sqlite3_bind_int64(stmt.?, 3, now) != SQLITE_OK) return error.SqliteBindFailed;
+        if (sqlite3_bind_int64(stmt.?, 4, recipient_count) != SQLITE_OK) return error.SqliteBindFailed;
+        if (sqlite3_step(stmt) != SQLITE_DONE) return error.SqliteStepFailed;
     }
 };
 
@@ -227,6 +291,8 @@ fn handleRequest(arena: Allocator, app: *App, request: *std.http.Server.Request)
 
     if (request.head.method == .GET and std.mem.eql(u8, path, "/")) return index(arena, app, request);
     if (request.head.method == .GET and std.mem.eql(u8, path, "/styles.css")) return css(request);
+    if (request.head.method == .GET and std.mem.eql(u8, path, "/admin")) return admin(arena, app, request);
+    if (request.head.method == .POST and std.mem.eql(u8, path, "/admin/send-update")) return adminSendUpdate(arena, app, request);
     if (request.head.method == .POST and std.mem.eql(u8, path, "/subscribe")) return subscribe(arena, app, request);
     if (request.head.method == .GET and std.mem.startsWith(u8, path, "/unsubscribe/")) return unsubscribe(arena, app, request, path[13..]);
     if (request.head.method == .GET and std.mem.eql(u8, path, "/health")) return request.respond("ok", .{});
@@ -242,6 +308,46 @@ fn index(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
 
 fn css(request: *std.http.Server.Request) !void {
     try request.respond(@embedFile("styles.css"), .{ .extra_headers = &css_headers });
+}
+
+fn admin(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
+    _ = arena;
+    if (!adminAuthorized(app, request)) return unauthorized(request);
+    try request.respond(admin_html, .{ .extra_headers = &html_headers });
+}
+
+fn adminSendUpdate(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
+    if (!adminAuthorized(app, request)) return unauthorized(request);
+    const lock = acquireAdminSendLock() catch |err| switch (err) {
+        error.PathAlreadyExists => return adminResult(arena, request, "Busy", "An update is already being sent."),
+        else => |e| return e,
+    };
+    defer releaseAdminSendLock(lock);
+
+    const body = try readBodyLimit(arena, request, max_update_body_size);
+    const subject_raw = formValue(body, "subject") orelse return adminResult(arena, request, "Not sent", "Missing subject.");
+    const message_raw = formValue(body, "body") orelse return adminResult(arena, request, "Not sent", "Missing message.");
+    const update = parseAdminUpdate(arena, subject_raw, message_raw) catch {
+        return adminResult(arena, request, "Not sent", "Subject or message is invalid.");
+    };
+
+    const result = sendUpdate(arena, app.config, app.db, update.subject, update.body, .send) catch |err| switch (err) {
+        error.SmtpNotConfigured => return adminResult(arena, request, "Not sent", "SMTP is not configured."),
+        else => |e| return e,
+    };
+    const message = try std.fmt.allocPrint(arena, "Sent {d} email(s), {d} failed.", .{ result.sent_count, result.failed_count });
+    if (result.failed_count == 0) {
+        try adminResult(arena, request, "Sent", message);
+    } else {
+        try adminResult(arena, request, "Partially sent", message);
+    }
+}
+
+fn adminResult(arena: Allocator, request: *std.http.Server.Request, title: []const u8, message: []const u8) !void {
+    const title_html = try htmlEscape(arena, title);
+    const message_html = try htmlEscape(arena, message);
+    const body = try std.fmt.allocPrint(arena, admin_result_html, .{ title_html, message_html });
+    try request.respond(body, .{ .extra_headers = &html_headers });
 }
 
 fn subscribe(arena: Allocator, app: *App, request: *std.http.Server.Request) !void {
@@ -287,10 +393,16 @@ fn respondDatastarPatch(request: *std.http.Server.Request, selector: []const u8,
 }
 
 fn readBody(arena: Allocator, request: *std.http.Server.Request) ![]u8 {
+    return readBodyLimit(arena, request, max_body_size);
+}
+
+fn readBodyLimit(arena: Allocator, request: *std.http.Server.Request, limit: usize) ![]u8 {
+    assert(limit > 0);
+    assert(limit <= max_update_body_size);
     request.head.expect = null;
     var buffer: [4096]u8 = undefined;
     var reader = request.readerExpectNone(&buffer);
-    return reader.allocRemaining(arena, .limited(max_body_size));
+    return reader.allocRemaining(arena, .limited(limit));
 }
 
 fn formValue(body: []const u8, key: []const u8) ?[]const u8 {
@@ -380,8 +492,16 @@ fn htmlEscape(arena: Allocator, input: []const u8) ![]u8 {
 
 fn bindText(stmt: *sqlite3_stmt, idx: c_int, text: []const u8) !void {
     assert(idx > 0);
-    assert(text.len <= max_body_size);
+    assert(text.len <= max_update_body_size);
     if (sqlite3_bind_text(stmt, idx, text.ptr, @intCast(text.len), SQLITE_TRANSIENT) != SQLITE_OK) return error.SqliteBindFailed;
+}
+
+fn columnTextDup(allocator: Allocator, stmt: ?*sqlite3_stmt, column_index: c_int) ![]const u8 {
+    assert(column_index >= 0);
+    const pointer = sqlite3_column_text(stmt, column_index) orelse return error.SqliteStepFailed;
+    const byte_count: usize = @intCast(sqlite3_column_bytes(stmt, column_index));
+    assert(byte_count <= max_body_size);
+    return allocator.dupe(u8, pointer[0..byte_count]);
 }
 
 fn envOrDup(allocator: Allocator, key: []const u8, fallback: []const u8) ![]const u8 {
@@ -401,11 +521,288 @@ fn envU16(key: []const u8, fallback: u16) !u16 {
 }
 
 fn sendUpdateCli(allocator: Allocator, config: Config, db: Database, path: []const u8) !void {
-    _ = config;
-    const body = try std.Io.Dir.cwd().readFileAlloc(shared_io, path, allocator, .limited(1024 * 1024));
+    const file = try std.Io.Dir.cwd().readFileAlloc(shared_io, path, allocator, .limited(max_update_body_size));
+    defer allocator.free(file);
+    const update = try parseUpdateFile(file);
+    const result = try sendUpdate(allocator, config, db, update.subject, update.body, .dry_run);
+    std.debug.print("Dry run ok: would send {d} email(s), {d} would fail.\n", .{ result.sent_count, result.failed_count });
+}
+
+const SendMode = enum { dry_run, send };
+
+fn sendUpdate(allocator: Allocator, config: Config, db: Database, subject: []const u8, body: []const u8, mode: SendMode) !SendResult {
+    if (mode == .send) validateSmtpConfig(config) catch return error.SmtpNotConfigured;
+
+    const subscribers = try db.subscriberList(allocator);
+    defer {
+        for (subscribers) |subscriber| subscriber.deinit(allocator);
+        allocator.free(subscribers);
+    }
+
+    var result = SendResult{ .sent_count = 0, .failed_count = 0 };
+    for (subscribers) |subscriber| {
+        if (mode == .send) {
+            sendOne(allocator, config, subscriber, subject, body) catch |err| {
+                result.failed_count += 1;
+                std.log.err("email send failed for subscriber: {}", .{err});
+                continue;
+            };
+        }
+        result.sent_count += 1;
+    }
+
+    if (mode == .send) try db.recordSentUpdate(subject, body, nowSeconds(), result.sent_count);
+    return result;
+}
+
+fn sendOne(allocator: Allocator, config: Config, subscriber: Subscriber, subject: []const u8, body: []const u8) !void {
+    const message = try renderEmail(allocator, config, subscriber, subject, body);
+    defer allocator.free(message);
+
+    const temp_path = try tempEmailPath(allocator);
+    defer allocator.free(temp_path);
+    try std.Io.Dir.cwd().writeFile(shared_io, .{
+        .sub_path = temp_path,
+        .data = message,
+        .flags = .{ .permissions = .fromMode(0o600) },
+    });
+    defer std.Io.Dir.cwd().deleteFile(shared_io, temp_path) catch {};
+
+    const port = try std.fmt.allocPrint(allocator, "{d}", .{config.smtp_port});
+    defer allocator.free(port);
+    const url = try std.fmt.allocPrint(allocator, "smtp://{s}:{s}", .{ config.smtp_host, port });
+    defer allocator.free(url);
+    const from = try mailAddress(allocator, config.smtp_from);
+    defer allocator.free(from);
+    const netrc_path = try tempNetrcPath(allocator);
+    defer allocator.free(netrc_path);
+    try writeNetrc(allocator, config, netrc_path);
+    defer std.Io.Dir.cwd().deleteFile(shared_io, netrc_path) catch {};
+
+    const argv = [_][]const u8{
+        "curl",  "--silent",    "--show-error",   "--fail",        "--ssl-reqd",
+        "--url", url,           "--netrc-file",   netrc_path,      "--mail-from",
+        from,    "--mail-rcpt", subscriber.email, "--upload-file", temp_path,
+    };
+    const run = try std.process.run(allocator, shared_io, .{
+        .argv = &argv,
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    if (!run.term.success()) return error.CurlSmtpFailed;
+}
+
+fn renderEmail(allocator: Allocator, config: Config, subscriber: Subscriber, subject: []const u8, body: []const u8) ![]const u8 {
+    const unsubscribe_url = try std.fmt.allocPrint(allocator, "{s}/unsubscribe/{s}", .{ config.base_url, subscriber.unsubscribe_token });
+    defer allocator.free(unsubscribe_url);
+    const from = try headerLineValue(allocator, config.smtp_from);
+    defer allocator.free(from);
+    const safe_subject = try headerLineValue(allocator, subject);
+    defer allocator.free(safe_subject);
+
+    return std.fmt.allocPrint(allocator,
+        \\From: {s}
+        \\To: {s}
+        \\Subject: {s}
+        \\MIME-Version: 1.0
+        \\Content-Type: text/plain; charset=UTF-8
+        \\List-Unsubscribe: <{s}>
+        \\
+        \\{s}
+        \\
+        \\
+        \\--
+        \\Unsubscribe: {s}
+        \\
+    , .{ from, subscriber.email, safe_subject, unsubscribe_url, body, unsubscribe_url });
+}
+
+fn parseUpdateFile(file: []const u8) !Update {
+    if (file.len == 0) return error.InvalidUpdate;
+    if (file.len > max_update_body_size) return error.InvalidUpdate;
+    var lines = std.mem.splitScalar(u8, file, '\n');
+    const first = lines.next() orelse return error.InvalidUpdate;
+    if (!std.mem.startsWith(u8, first, "Subject:")) return error.InvalidUpdate;
+    const subject = std.mem.trim(u8, first[8..], " \t\r\n");
+    if (!validSubject(subject)) return error.InvalidUpdate;
+    const body_start = if (std.mem.indexOfScalar(u8, file, '\n')) |i| i + 1 else return error.InvalidUpdate;
+    const body = std.mem.trim(u8, file[body_start..], "\r\n");
+    if (!validMessageBody(body)) return error.InvalidUpdate;
+    return .{ .subject = subject, .body = body };
+}
+
+fn parseAdminUpdate(arena: Allocator, subject_raw: []const u8, message_raw: []const u8) !Update {
+    const subject_decoded = try urlDecode(arena, subject_raw);
+    const message_decoded = try urlDecode(arena, message_raw);
+    const subject = std.mem.trim(u8, subject_decoded, " \t\r\n");
+    const body = std.mem.trim(u8, message_decoded, " \t\r\n");
+    if (!validSubject(subject)) return error.InvalidUpdate;
+    if (!validMessageBody(body)) return error.InvalidUpdate;
+    return .{ .subject = subject, .body = body };
+}
+
+fn validateSmtpConfig(config: Config) !void {
+    if (config.smtp_host.len == 0) return error.SmtpNotConfigured;
+    if (config.smtp_username.len == 0) return error.SmtpNotConfigured;
+    if (config.smtp_password.len == 0) return error.SmtpNotConfigured;
+    if (config.smtp_from.len == 0) return error.SmtpNotConfigured;
+    if (config.smtp_port == 0) return error.SmtpNotConfigured;
+}
+
+fn validSubject(subject: []const u8) bool {
+    if (subject.len == 0) return false;
+    if (subject.len > 120) return false;
+    for (subject) |byte| {
+        if (byte == '\r') return false;
+        if (byte == '\n') return false;
+        if (byte < 0x20) return false;
+        if (byte == 0x7f) return false;
+    }
+    return true;
+}
+
+fn validMessageBody(body: []const u8) bool {
+    if (body.len == 0) return false;
+    if (body.len > max_update_body_size) return false;
+    for (body) |byte| {
+        if (byte == 0) return false;
+        if (byte == '\t') continue;
+        if (byte == '\n') continue;
+        if (byte == '\r') continue;
+        if (byte < 0x20) return false;
+        if (byte == 0x7f) return false;
+    }
+    return true;
+}
+
+fn headerLineValue(allocator: Allocator, input: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (input) |byte| {
+        if (byte == '\r') continue;
+        if (byte == '\n') continue;
+        try out.append(allocator, byte);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn mailAddress(allocator: Allocator, from: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, from, '<')) |start| {
+        if (std.mem.indexOfScalarPos(u8, from, start + 1, '>')) |end| {
+            const email = std.mem.trim(u8, from[start + 1 .. end], " \t\r\n");
+            if (!validEmail(email)) return error.InvalidEmail;
+            return allocator.dupe(u8, email);
+        }
+    }
+    const email = std.mem.trim(u8, from, " \t\r\n");
+    if (!validEmail(email)) return error.InvalidEmail;
+    return allocator.dupe(u8, email);
+}
+
+fn writeNetrc(allocator: Allocator, config: Config, path: []const u8) !void {
+    if (!validNetrcToken(config.smtp_host)) return error.InvalidSmtpConfig;
+    if (!validNetrcToken(config.smtp_username)) return error.InvalidSmtpConfig;
+    if (!validNetrcToken(config.smtp_password)) return error.InvalidSmtpConfig;
+    const body = try std.fmt.allocPrint(allocator, "machine {s} login {s} password {s}\n", .{
+        config.smtp_host,
+        config.smtp_username,
+        config.smtp_password,
+    });
     defer allocator.free(body);
-    const count = try db.subscriberCount();
-    std.debug.print("SMTP sending is scaffolded, not implemented yet. Would send {s} to {d} subscribers.\n", .{ path, count });
+    try std.Io.Dir.cwd().writeFile(shared_io, .{
+        .sub_path = path,
+        .data = body,
+        .flags = .{ .permissions = .fromMode(0o600) },
+    });
+}
+
+fn validNetrcToken(token: []const u8) bool {
+    if (token.len == 0) return false;
+    if (token.len > 512) return false;
+    for (token) |byte| {
+        if (byte <= 0x20) return false;
+        if (byte == 0x7f) return false;
+    }
+    return true;
+}
+
+fn tempEmailPath(allocator: Allocator) ![]const u8 {
+    var bytes: [16]u8 = undefined;
+    try randomBytes(&bytes);
+    const hex = try hexLower(allocator, &bytes);
+    defer allocator.free(hex);
+    return std.fmt.allocPrint(allocator, "/tmp/sam-sh-mail-{s}.eml", .{hex});
+}
+
+fn tempNetrcPath(allocator: Allocator) ![]const u8 {
+    var bytes: [16]u8 = undefined;
+    try randomBytes(&bytes);
+    const hex = try hexLower(allocator, &bytes);
+    defer allocator.free(hex);
+    return std.fmt.allocPrint(allocator, "/tmp/sam-sh-netrc-{s}", .{hex});
+}
+
+fn acquireAdminSendLock() !std.Io.File {
+    return std.Io.Dir.cwd().createFile(shared_io, admin_lock_path, .{
+        .exclusive = true,
+        .read = true,
+        .permissions = .fromMode(0o600),
+    });
+}
+
+fn releaseAdminSendLock(file: std.Io.File) void {
+    file.close(shared_io);
+    std.Io.Dir.cwd().deleteFile(shared_io, admin_lock_path) catch {};
+}
+
+fn adminAuthorized(app: *const App, request: *const std.http.Server.Request) bool {
+    if (app.config.admin_username.len == 0) return false;
+    if (app.config.admin_password.len == 0) return false;
+
+    const authorization = requestHeader(request, "authorization") orelse return false;
+    const expected = expectedBasicAuthorization(app.allocator, app.config.admin_username, app.config.admin_password) catch return false;
+    defer app.allocator.free(expected);
+    return constantTimeEqual(authorization, expected);
+}
+
+fn expectedBasicAuthorization(allocator: Allocator, username: []const u8, password: []const u8) ![]const u8 {
+    assert(username.len > 0);
+    assert(password.len > 0);
+    const raw = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ username, password });
+    defer allocator.free(raw);
+    const size = std.base64.standard.Encoder.calcSize(raw.len);
+    const encoded = try allocator.alloc(u8, size);
+    defer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, raw);
+    return std.fmt.allocPrint(allocator, "Basic {s}", .{encoded});
+}
+
+fn constantTimeEqual(a: []const u8, b: []const u8) bool {
+    var diff: usize = a.len ^ b.len;
+    const count = @min(a.len, b.len);
+    for (a[0..count], b[0..count]) |a_byte, b_byte| diff |= @as(usize, a_byte ^ b_byte);
+    return diff == 0;
+}
+
+fn requestHeader(request: *const std.http.Server.Request, name: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, request.head_buffer, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (line.len == 0) return null;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const header_name = std.mem.trim(u8, line[0..colon], " \t");
+        if (!std.ascii.eqlIgnoreCase(header_name, name)) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t");
+    }
+    return null;
+}
+
+fn unauthorized(request: *std.http.Server.Request) !void {
+    try request.respond("admin credentials required", .{
+        .status = .unauthorized,
+        .extra_headers = &unauthorized_headers,
+    });
 }
 
 const html_headers = [_]std.http.Header{.{ .name = "content-type", .value = "text/html; charset=UTF-8" }};
@@ -414,8 +811,11 @@ const sse_headers = [_]std.http.Header{
     .{ .name = "content-type", .value = "text/event-stream; charset=UTF-8" },
     .{ .name = "cache-control", .value = "no-cache" },
 };
+const unauthorized_headers = [_]std.http.Header{.{ .name = "www-authenticate", .value = "Basic realm=\"sam.sh admin\", charset=\"UTF-8\"" }};
 
 const index_html = @embedFile("templates/index.html");
+const admin_html = @embedFile("templates/admin.html");
+const admin_result_html = @embedFile("templates/admin-result.html");
 const subscribe_success_html = @embedFile("templates/subscribe-success.html");
 const subscribe_error_html = @embedFile("templates/subscribe-error.html");
 const unsubscribe_html = @embedFile("templates/unsubscribe.html");

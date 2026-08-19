@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin — sam.sh</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="wall">
+    <section class="paper-card newsletter">
+      <p class="eyebrow">admin</p>
+      <h1>Send personal update</h1>
+      <p>This sends one plain-text email to each confirmed subscriber via SMTP.</p>
+      <form method="post" action="/admin/send-update">
+        <label for="subject">Subject</label>
+        <input id="subject" name="subject" type="text" maxlength="120" required>
+        <label for="body">Message</label>
+        <textarea id="body" name="body" rows="14" maxlength="32768" required></textarea>
+        <div class="form-row admin-actions">
+          <button type="submit">Send update</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

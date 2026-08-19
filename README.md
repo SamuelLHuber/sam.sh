@@ -39,13 +39,25 @@ DATABASE_PATH=/data/sam-sh.sqlite
 
 and mount a persistent volume at `/data`.
 
-## Newsletter CLI
+## Newsletter sending
 
-Scaffolded command:
+Set SMTP and admin credentials in Railway or your local environment:
+
+```txt
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=you@example.com
+SMTP_PASSWORD=...
+SMTP_FROM="Samuel <you@example.com>"
+ADMIN_USERNAME=samuel
+ADMIN_PASSWORD=long-random-password
+```
+
+Then open `/admin`. The admin page is protected with HTTP Basic Auth and sends one plain-text email to each confirmed subscriber. Each message includes that subscriber's unsubscribe link.
+
+The CLI command validates an update file and reports how many confirmed subscribers would receive it; it does not send mail:
 
 ```sh
 zig build run -- send-update ./updates/example.md
 ```
-
-SMTP delivery is intentionally still TODO in this initial scaffold.
 

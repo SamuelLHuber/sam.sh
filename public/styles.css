@@ -205,20 +205,31 @@ label {
   margin-bottom: 8px;
 }
 
-input {
+input,
+textarea {
   min-width: min(100%, 320px);
   border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 999px;
   background: rgba(0,0,0,0.22);
   color: var(--cream);
   padding: 13px 16px;
   font: inherit;
 }
 
-input:focus-visible {
+input { border-radius: 999px; }
+
+textarea {
+  width: 100%;
+  border-radius: 18px;
+  resize: vertical;
+}
+
+input:focus-visible,
+textarea:focus-visible {
   outline: 2px solid rgba(208,160,95,0.55);
   outline-offset: 2px;
 }
+
+.admin-actions { margin-top: 16px; }
 
 .notice {
   margin-top: 16px;
